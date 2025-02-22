@@ -1,8 +1,330 @@
-{
-	"folders": [
-		{
-			"path": "."
-		}
-	],
-	"settings": {}
-}
+import numpy as np
+import random
+import pygame
+from collections import defaultdict
+import matplotlib.pyplot as plt
+
+class FlappyBirdEnv:
+    def __init__(self):
+        pygame.init()
+        self.screen_width = 288  # the width of the game window
+        self.screen_height = 512  # the height of the game window
+        self.clock = pygame.time.Clock()
+        self.fps = 60
+
+        self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
+        pygame.display.set_caption('Flappy Bird Q-learning')
+
+        # display background image
+        self.background_image = pygame.image.load('D:/temporary download/tilesetOpenGameBackground.png').convert()
+        self.background_image = pygame.transform.scale(self.background_image, (self.screen_width, self.screen_height))
+
+        # load bird images
+        self.bird_width = 34
+        self.bird_height = 24
+        bird_original_images = [
+            pygame.image.load('D:/temporary download/flappy-dragon-sprite-sheets/PNG/frame-1.png').convert_alpha(),
+            pygame.image.load('D:/temporary download/flappy-dragon-sprite-sheets/PNG/frame-2.png').convert_alpha(),
+            pygame.image.load('D:/temporary download/flappy-dragon-sprite-sheets/PNG/frame-3.png').convert_alpha()
+        ]
+        self.bird_images = [pygame.transform.scale(img, (self.bird_width, self.bird_height)) for img in bird_original_images]
+        self.bird_index = 0
+        self.bird_animation_time = 5  # the number of frames to show the bird image
+
+        # bird properties
+        self.bird_x = 50
+        self.bird_y = self.screen_height // 2
+        self.bird_vel_y = 0
+        self.gravity = 0.2
+        self.flap_power = -4
+
+        # load pipe images
+        self.pipe_image = pygame.image.load('D:/temporary download/pipe-green.png').convert_alpha()
+        self.pipe_width = self.pipe_image.get_width()
+        self.pipe_height = self.pipe_image.get_height()
+        self.pipe_inverted_image = pygame.transform.flip(self.pipe_image, False, True)
+
+        # pipe properties
+        self.pipe_gap = 220
+        self.pipe_speed = 3
+        self.pipe_frequency = 2000  # milliseconds
+        self.last_pipe = pygame.time.get_ticks()
+        self.pipes = []
+
+        # life properties
+        self.max_lives = 5
+        self.lives = self.max_lives
+        self.heart_image = pygame.image.load('D:/temporary download/heart.png').convert_alpha()
+        self.heart_image = pygame.transform.scale(self.heart_image, (20, 20))
+        
+        # collision properties
+        self.collision_cooldown = 1000 # milliseconds
+        self.last_collision_time = 0
+
+        # countdown images
+       
+        self.countdown_images = {
+            3: pygame.transform.scale(pygame.image.load('D:/temporary download/3.png').convert_alpha(), (100, 100)),
+            2: pygame.transform.scale(pygame.image.load('D:/temporary download/2.png').convert_alpha(), (100, 100)),
+            1: pygame.transform.scale(pygame.image.load('D:/temporary download/1.png').convert_alpha(), (100, 100))
+        }
+
+        # game properties
+        self.score = 0
+        self.done = False
+
+        # font properties
+        self.font = pygame.font.SysFont(None, 36)
+
+    def reset(self):
+        self.bird_y = self.screen_height // 2
+        self.bird_vel_y = 0
+        self.pipes = []
+        self.score = 0
+        self.done = False
+        self.lives = self.max_lives
+        self.last_pipe = pygame.time.get_ticks()
+        self.last_collision_time = 0
+        return self.get_state()
+
+    def pause_and_recenter(self):
+        pause_duration = 3000  # 毫秒
+        start_time = pygame.time.get_ticks()
+        while pygame.time.get_ticks() - start_time < pause_duration:
+            remaining = (pause_duration - (pygame.time.get_ticks() - start_time)) // 1000 + 1
+            self.render_countdown(remaining)
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    exit()
+        self.bird_y = (self.screen_height - self.bird_height) // 2
+        self.bird_vel_y = 0
+
+    def render_countdown(self, remaining):
+        #Render the current state (background, pipes, birds, blood bars, etc.
+        self.screen.blit(self.background_image, (0, 0))
+        for pipe in self.pipes:
+            pipe_x = pipe['x']
+            gap_y = pipe['gap_y']
+            if pipe['top_height'] > 0:
+                self.screen.blit(pipe['top_image'], (pipe_x, 0))
+                pygame.draw.rect(self.screen, (255, 0, 0), (pipe_x, 0, self.pipe_width, pipe['top_height']), 2)
+            bottom_y = int(gap_y + self.pipe_gap / 2)
+            if pipe['bottom_height'] > 0:
+                self.screen.blit(pipe['bottom_image'], (pipe_x, bottom_y))
+                pygame.draw.rect(self.screen, (255, 0, 0), (pipe_x, bottom_y, self.pipe_width, pipe['bottom_height']), 2)
+        self.bird_index = (self.bird_index + 1) % (self.bird_animation_time * len(self.bird_images))
+        bird_frame = self.bird_index // self.bird_animation_time
+        bird_image = self.bird_images[bird_frame]
+        self.screen.blit(bird_image, (self.bird_x, self.bird_y))
+        pygame.draw.rect(self.screen, (0, 255, 0), (self.bird_x, self.bird_y, self.bird_width, self.bird_height), 2)
+        score_surface = self.font.render(f'Score: {self.score}', True, (255, 0, 0))
+        self.screen.blit(score_surface, (10, 10))
+        heart_x = 10
+        heart_y = 40
+        for i in range(self.lives):
+            self.screen.blit(self.heart_image, (heart_x, heart_y))
+            heart_x += self.heart_image.get_width() + 5
+        # Show countdown picture
+        countdown_number = remaining if remaining <= 3 else 3
+        countdown_img = self.countdown_images[countdown_number]
+        # put the countdown picture in the center of the screen
+        img_rect = countdown_img.get_rect(center=(self.screen_width // 2, self.screen_height // 2))
+        self.screen.blit(countdown_img, img_rect)
+        pygame.display.flip()
+        self.clock.tick(self.fps)
+
+    def step(self, action):
+        current_time = pygame.time.get_ticks()
+        
+        # update bird position
+        if action == 1:
+            self.bird_vel_y = self.flap_power
+        self.bird_vel_y += self.gravity
+        self.bird_y += self.bird_vel_y
+        
+        # ensure bird is within the screen
+        if self.bird_y < 0:
+            self.bird_y = 0
+            self.bird_vel_y = 0
+        if self.bird_y > self.screen_height - self.bird_height:
+            self.bird_y = self.screen_height - self.bird_height
+            self.bird_vel_y = 0
+        
+        # generate new pipes
+        if current_time - self.last_pipe > self.pipe_frequency:
+            min_gap_y = int(self.pipe_gap / 2 + 50)
+            max_gap_y = int(self.screen_height - self.pipe_gap / 2 - 50)
+            gap_y = random.randint(min_gap_y, max_gap_y)
+            top_pipe_height = int(gap_y - self.pipe_gap / 2)
+            bottom_pipe_height = int(self.screen_height - (gap_y + self.pipe_gap / 2))
+            if top_pipe_height <= 0:
+                top_pipe_height = 1
+            if bottom_pipe_height <= 0:
+                bottom_pipe_height = 1
+            top_image = pygame.transform.scale(self.pipe_inverted_image, (self.pipe_width, top_pipe_height))
+            bottom_image = pygame.transform.scale(self.pipe_image, (self.pipe_width, bottom_pipe_height))
+            self.pipes.append({
+                'x': self.screen_width,
+                'gap_y': gap_y,
+                'passed': False,
+                'top_image': top_image,
+                'bottom_image': bottom_image,
+                'top_height': top_pipe_height,
+                'bottom_height': bottom_pipe_height
+            })
+            self.last_pipe = current_time
+        
+        # update pipe positions
+        for pipe in self.pipes:
+            pipe['x'] -= self.pipe_speed
+        
+        # remove pipes that have moved off the screen
+        self.pipes = [pipe for pipe in self.pipes if pipe['x'] + self.pipe_width > 0]
+        
+        
+        reward = 1
+        
+        # check if the bird has passed through the pipes
+        bird_rect = pygame.Rect(self.bird_x, self.bird_y, self.bird_width, self.bird_height)
+        for pipe in self.pipes:
+            pipe_x = pipe['x']
+            gap_y = pipe['gap_y']
+            top_rect = pygame.Rect(pipe_x, 0, self.pipe_width, pipe['top_height'])
+            bottom_y = gap_y + self.pipe_gap / 2
+            bottom_rect = pygame.Rect(pipe_x, bottom_y, self.pipe_width, pipe['bottom_height'])
+            
+            if bird_rect.colliderect(top_rect) or bird_rect.colliderect(bottom_rect):
+                if current_time - self.last_collision_time >= self.collision_cooldown:
+                    self.lives -= 1
+                    self.last_collision_time = current_time
+                    reward = -100
+                    if self.lives > 0:
+                        # Count down for 3 seconds, then center the bird vertically and continue the game
+                        self.pause_and_recenter()
+                    else:
+                        self.done = True
+                    return self.get_state(), reward, self.done
+            
+            if not pipe['passed'] and pipe_x + self.pipe_width < self.bird_x:
+                pipe['passed'] = True
+                self.score += 1
+                reward = 100
+                break
+        
+        return self.get_state(), reward, self.done
+
+    def get_state(self):
+        y_bins = np.linspace(0, self.screen_height, 20)
+        y_bin = np.digitize(self.bird_y, y_bins) - 1
+        vel_bins = np.linspace(-15, 15, 15)
+        vel_bin = np.digitize(self.bird_vel_y, vel_bins) - 1
+        if self.pipes:
+            next_pipe = self.pipes[0]
+            dist_to_pipe = next_pipe['x'] - self.bird_x
+            dist_bins = np.linspace(0, self.screen_width, 10)
+            dist_bin = np.digitize(dist_to_pipe, dist_bins) - 1
+            pipe_gap_y = next_pipe['gap_y']
+            pipe_bins = np.linspace(0, self.screen_height, 20)
+            pipe_bin = np.digitize(pipe_gap_y, pipe_bins) - 1
+        else:
+            dist_bin = 9
+            pipe_bin = 9
+        state = (y_bin, vel_bin, dist_bin, pipe_bin)
+        return state
+
+    def render(self):
+        self.screen.blit(self.background_image, (0, 0))
+        for pipe in self.pipes:
+            pipe_x = pipe['x']
+            gap_y = pipe['gap_y']
+            if pipe['top_height'] > 0:
+                self.screen.blit(pipe['top_image'], (pipe_x, 0))
+                pygame.draw.rect(self.screen, (255, 0, 0), (pipe_x, 0, self.pipe_width, pipe['top_height']), 2)
+            bottom_y = int(gap_y + self.pipe_gap / 2)
+            if pipe['bottom_height'] > 0:
+                self.screen.blit(pipe['bottom_image'], (pipe_x, bottom_y))
+                pygame.draw.rect(self.screen, (255, 0, 0), (pipe_x, bottom_y, self.pipe_width, pipe['bottom_height']), 2)
+        self.bird_index = (self.bird_index + 1) % (self.bird_animation_time * len(self.bird_images))
+        bird_frame = self.bird_index // self.bird_animation_time
+        bird_image = self.bird_images[bird_frame]
+        self.screen.blit(bird_image, (self.bird_x, self.bird_y))
+        pygame.draw.rect(self.screen, (0, 255, 0), (self.bird_x, self.bird_y, self.bird_width, self.bird_height), 2)
+        score_surface = self.font.render(f'Score: {self.score}', True, (255, 0, 0))
+        self.screen.blit(score_surface, (10, 10))
+        heart_x = 10
+        heart_y = 40
+        for i in range(self.lives):
+            self.screen.blit(self.heart_image, (heart_x, heart_y))
+            heart_x += self.heart_image.get_width() + 5
+        pygame.display.flip()
+        self.clock.tick(self.fps)
+
+class QLearningAgent:
+    def __init__(self, actions, alpha=0.2, gamma=0.9, epsilon=1.0):
+        self.q_table = defaultdict(lambda: np.zeros(len(actions)))
+        self.actions = actions
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.epsilon_min = 0.01
+        self.epsilon_decay = 0.995
+
+    def choose_action(self, state):
+        if np.random.rand() < self.epsilon:
+            return np.random.choice(self.actions)
+        else:
+            return np.argmax(self.q_table[state])
+
+    def learn(self, state, action, reward, next_state):
+        predict = self.q_table[state][action]
+        target = reward + self.gamma * np.max(self.q_table[next_state])
+        self.q_table[state][action] += self.alpha * (target - predict)
+
+def train_agent():
+    env = FlappyBirdEnv()
+    actions = [0, 1]
+    agent = QLearningAgent(actions)
+    num_episodes = 1500
+
+    total_rewards = []
+    scores = []
+
+    for episode in range(num_episodes):
+        state = env.reset()
+        total_reward = 0
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    return
+            action = agent.choose_action(state)
+            next_state, reward, done = env.step(action)
+            agent.learn(state, action, reward, next_state)
+            state = next_state
+            total_reward += reward
+            env.render()
+            if done:
+                print(f"Episode: {episode + 1}, Total Reward: {total_reward}, Score: {env.score}, Lives: {env.lives}")
+                break
+        if agent.epsilon > agent.epsilon_min:
+            agent.epsilon *= agent.epsilon_decay
+        total_rewards.append(total_reward)
+        scores.append(env.score)
+    
+    plt.figure(figsize=(12, 5))
+    plt.plot(total_rewards)
+    plt.xlabel('Episode')
+    plt.ylabel('Total Reward')
+    plt.title('Total Rewards over Episodes')
+    plt.show()
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(scores)
+    plt.xlabel('Episode')
+    plt.ylabel('Score')
+    plt.title('Scores over Episodes')
+    plt.show()
+
+if __name__ == "__main__":
+    train_agent()
